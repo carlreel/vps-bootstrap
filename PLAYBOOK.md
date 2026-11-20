@@ -214,6 +214,8 @@ curl -s -o /dev/null -w "%{http_code}\n" --http1.1 \
 | 6 | **acme-yg 的 `ca.log` 与 sb 脚本不同步** | acme-yg 说有证书，sb 说没有 | sb 只认 `/root/ygkkkca/ca.log` 是否存在；补上这个文件即可 |
 | 7 | **sed 替换含 `&` 的字符串** | 行被写成一坨乱码 | `&` 在 sed 替换串里代表整个匹配；改用 Python 按行重写 |
 | 8 | **Cloudflare Tunnel ingress 协议错** | 隧道 HEALTHY，但访问 502/403 | origin 写成 `https://localhost:2082`，而 2082 是明文；改成 `http://` |
+| 9 | **境外 DoH 的 443 被阻断** | 国内网站加载卡几十秒；`nameserver` 写了 `https://1.1.1.1/dns-query` | UDP 53 通（65–221ms），但 DoH over 443 超时。DNS 一律改国内：`223.5.5.5` / `doh.pub` / `114.114.114.114` |
+| 10 | **「ping 通节点 ≠ 能用」** | 节点延迟正常，客户端却打不开境外网站 | ping 只证明能到达服务器。DNS 解析失败的表现与「节点不通」完全一样，但排查方向相反。先查客户端 DNS，再怀疑节点 |
 
 ### 附加：协议可用性速查（路线 ②）
 

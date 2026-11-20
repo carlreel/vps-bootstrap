@@ -274,6 +274,10 @@ bash vps-bootstrap.sh harden
 | Argo 403 | SNI 与 Host 不一致 | 客户端 `sni` 必须等于 ingress 的 hostname |
 | 改 iptables 后失联 | 没放行 tailscale0 | 从 Tailscale 或 VNC 进去补规则 |
 | nginx 订阅 401 但密码对 | `$PASSWORD` 为空 / htpasswd 未生成 | 重新 `htpasswd -bc` |
+| **节点 ping 通但上不了外网** | **DNS 解析失败**（最常见） | 客户端启用「远程 DNS」/ DoH；Clash 改国内 nameserver |
+| **境外 DoH 超时** | **DoH 的 443 被阻断**（UDP 53 反而通） | 全部改用 `223.5.5.5` / `doh.pub` |
+| 国内网站加载卡几十秒 | `nameserver` 写了境外 DoH | 见「步骤 9 · DNS 三档配置」 |
+| Karing / v2rayN 里部分节点一选就没网 | `auto` 组混了被封节点 | 订阅里只保留可用节点（或手动选 hy2/tuic） |
 
 ---
 
@@ -318,3 +322,89 @@ bash vps-bootstrap.sh reset cert       # 重置某步以便重跑
 2. `bash vps-bootstrap.sh status` → 看哪些步骤已 done
 3. 只补未完成的步骤，**不要重跑已完成的**（虽然幂等，但会重启服务造成短暂中断）
 4. 遇到症状先查第 5 节的排查表，再动手
+
+---
+
+## 9. 客户端接入（服务器全绿之后的最后一公里）
+
+**这一步最容易白忙**：服务器侧全部正常、节点 ping 通，但客户端上不了网。
+
+### 核心判据
+
+> **ping 通节点 ≠ 能用。**
+> ping 只验证「能到达服务器」，不验证「域名能解析」。
+
+| 症状 | 根因 | 处方 |
+|---|---|---|
+| 节点延迟正常，但打不开任何境外网站 | **DNS 解析失败** | 见下方 DNS 三档配置 |
+| 选某些节点就完全没网 | 该节点是被封的 TCP 协议 | 只选 hy2 / tuic / argo |
+| 部分网站能开、部分不能 | 分流规则命中错误 | 先切「全局」验证，再改规则 |
+| hy2/tuic 不显示或报协议错误 | 客户端内核不支持 | 换 sing-box 内核 |
+
+### DNS 三档配置
+
+**v2rayN**
+```
+设置 → 参数设置 → 核心基础设置 → 内核：sing-box（Xray 不支持 hy2/tuic）
+设置 → DNS 设置 → ✅ 使用远程 DNS
+DNS 服务器：https://223.5.5.5/dns-query
+```
+
+**Karing**
+```
+优先用 TXT 订阅（JSON 对 sing-box 内核版本敏感）
+设置 → DNS → 启用 DoH：https://223.5.5.5/dns-query
+```
+
+**Clash Verge / Mihomo**（订阅 YAML 里写）
+```yaml
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  nameserver:
+    - "https://223.5.5.5/dns-query"
+    - "https://doh.pub/dns-query"
+    - "114.114.114.114"
+  nameserver-policy:
+    "geosite:cn,private": ["223.5.5.5", "119.29.29.29"]
+```
+
+### ⚠️ 关键坑：DoH 的 443 被阻断，UDP 53 反而通
+
+中国移动家宽实测：
+
+| 目标 | 协议 | 结果 |
+|---|---|---|
+| `8.8.8.8` | UDP 53 | ✅ 65 ms |
+| `1.1.1.1` | UDP 53 | ✅ 221 ms |
+| `https://1.1.1.1/dns-query` | **DoH / 443** | ❌ 超时 |
+| `https://8.8.8.8/dns-query` | **DoH / 443** | ❌ 超时 |
+
+**规则**：DNS 配置里**永远不要写境外 DoH**。国内 DoH（`223.5.5.5` / `doh.pub`）稳定可达。
+
+fake-ip 模式下，境外域名解析成 `198.18.x.x`，真实 IP 由节点端解析——**本地根本不需要能访问境外 DNS**。
+
+### 验证方法
+
+**Clash 看规则命中**：左侧「连接」页 → 每条连接会显示命中规则
+- 国内域名显示 `DIRECT` = 正确
+- 国内域名显示节点名 = 规则没生效，流量绕了代理
+
+**对比 DNS 速度**：
+```powershell
+Measure-Command { Resolve-DnsName www.baidu.com -Server 223.5.5.5 }
+Measure-Command { Resolve-DnsName www.baidu.com -Server 1.1.1.1 }   # 若用 DoH 则测 https://1.1.1.1/dns-query
+```
+
+### 节点可用性速查（路线② / IP 级 TCP 封锁）
+
+| 协议 | 传输层 | 能否用 | 备注 |
+|---|---|---|---|
+| hysteria2 | UDP/QUIC | ✅ | 配合端口跳跃 |
+| TUIC v5 | UDP/QUIC | ✅ | |
+| vmess-ws + CDN | TCP 443 → CF | ✅ | 需 ingress 配对 |
+| vless-reality | TCP | ❌ | 不能套 CDN |
+| vmess-ws 直连 | TCP | ❌ | |
+| anytls | TCP | ❌ | 无 UDP 变体 |
+
+**给用户的建议**：订阅里只保留前 3 类，避免「一选就死」。
