@@ -86,7 +86,7 @@ foreach ($p in 22,443,8443,2222,8080) { 测 <IP>:$p }
 
 ```bash
 # 方式一：服务器直接拉（仓库 public 时最省事，推荐）
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/vps-bootstrap.sh -o /root/vps-bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/carlreel/vps-bootstrap/main/vps-bootstrap.sh -o /root/vps-bootstrap.sh
 chmod +x /root/vps-bootstrap.sh
 
 # 方式二：AI 从本机 scp

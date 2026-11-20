@@ -25,7 +25,7 @@ sb 脚本能一键装起 sing-box，但它在这些地方会坑人：
 
 ```bash
 # 1. 送进服务器（仓库为 public，直接拉）
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/vps-bootstrap.sh -o /root/vps-bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/carlreel/vps-bootstrap/main/vps-bootstrap.sh -o /root/vps-bootstrap.sh
 chmod +x /root/vps-bootstrap.sh
 
 # 2. 看现状 / 看进度
