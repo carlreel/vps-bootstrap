@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 # ============================================================================
-# show-links.sh — 一行命令列出本机全部订阅链接与 SSH 入口
+# show-links.sh — 列出本机全部订阅链接（公网 + Tailscale），可直接复制粘贴
 #
-# 为什么需要它：
-#   订阅链接很长（域名 + 40 位 UUID + 账号密码），手抄必错；
-#   而且有两个入口（公网 443 / Tailscale 8080），到底该复制哪一条很容易搞混。
-#   跑这个脚本，屏幕上就是能直接复制的成串地址，还会标出哪条当前可用。
+# 设计约束（都是踩出来的）：
+#   · 中文在终端里占 2 列，所以**不对含中文的行做 %-Ns 补空格**，否则整列错位
+#   · 每条 URL 独立成行、前面只有 2 格缩进，鼠标三击就能选中整行
+#   · 横线宽度跟随终端宽度（上限 78），窗口窄了也不会折行
+#   · 徽标只用 ASCII（[OK] / [FAIL]），不用 ● ✓ 这类可能缺字形的符号
 #
 # 用法：
-#   bash show-links.sh             人读格式（默认，带可用性检测）
-#   bash show-links.sh --bare      只输出 URL，一行一条（给脚本用）
-#   bash show-links.sh --json      机器可读 JSON
-#   bash show-links.sh --no-check  跳过可用性检测（快 1~2 秒）
-#
-# 依赖：curl。所有值都从 state.env 读，不硬编码任何 IP / UUID / 密码。
+#   bash show-links.sh            人读格式（带可用性检测）
+#   bash show-links.sh --bare     只有 URL，一行一条（拖选全部即全部链接）
+#   bash show-links.sh --save     写到 /root/subscription-links.txt 并打印路径
+#   bash show-links.sh --json     JSON（给脚本用）
+#   bash show-links.sh --no-check 跳过可用性检测
 # ============================================================================
 set -uo pipefail
 
 STATE_FILE="${STATE_FILE:-/root/.vps-bootstrap/state.env}"
 WEBBOX_DIR="${WEBBOX_DIR:-/root/websbox}"
 SUB_TOKEN_LOG="${SUB_TOKEN_LOG:-/etc/s-box/subtoken.log}"
-NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/sub}"
+SAVE_PATH="${SAVE_PATH:-/root/subscription-links.txt}"
 CURL_MAX="${CURL_MAX:-8}"
 
 MODE=pretty
@@ -28,25 +28,39 @@ CHECK=1
 for a in "$@"; do
   case "$a" in
     --bare|--urls) MODE=bare ;;
+    --save)        MODE=save ;;
     --json)        MODE=json ;;
     --no-check)    CHECK=0 ;;
-    -h|--help)     sed -n '1,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) printf '未知参数：%s\n' "$a" >&2; exit 2 ;;
   esac
 done
 
-# ── 颜色（非交互输出自动关闭） ───────────────────────────────────────────
-if [ "$MODE" = pretty ] && [ -t 1 ]; then
-  G='\033[32m'; Y='\033[33m'; R='\033[31m'; C='\033[36m'; D='\033[2m'; B='\033[1m'; N='\033[0m'
+# ── 终端宽度（跟随窗口，上限 78，下限 46） ───────────────────────────────
+# 优先看真实 tty 宽度；非 tty（比如重定向到文件）时用 COLUMNS，否则默认 78
+COLS=""
+if [ -t 1 ]; then
+  COLS=$(tput cols 2>/dev/null || true)
+fi
+[ -z "$COLS" ] && COLS="${COLUMNS:-78}"
+case "$COLS" in ''|*[!0-9]*) COLS=78 ;; esac
+[ "$COLS" -gt 78 ] && COLS=78
+[ "$COLS" -lt 46 ] && COLS=46
+W=$COLS
+
+hr()  { printf '%*s\n' "$W" '' | tr ' ' '-'; }
+eq()  { printf '%*s\n' "$W" '' | tr ' ' '='; }
+
+# ── 颜色（非 tty 关闭） ──────────────────────────────────────────────────
+if [ -t 1 ] && [ "$MODE" = pretty ]; then
+  G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; D=$'\033[2m'; B=$'\033[1m'; N=$'\033[0m'
 else
-  G=''; Y=''; R=''; C=''; D=''; B=''; N=''
+  G=''; Y=''; R=''; D=''; B=''; N=''
 fi
 
-# ── 读取状态 ─────────────────────────────────────────────────────────────
+# ── 读状态 ───────────────────────────────────────────────────────────────
 R_NETWORK=""; R_TAILSCALE=""; R_CERT=""; R_SUBSCRIPTION=""; R_SUB_UUID=""
-R_ARGO_DOMAIN=""; R_HOPPING=""
 if [ -f "$STATE_FILE" ]; then
-  # 只取 R_* 赋值行，避免执行文件里的其它内容
   while IFS= read -r __ln; do
     case "$__ln" in
       R_*=*) eval "$__ln" 2>/dev/null || true ;;
@@ -54,14 +68,12 @@ if [ -f "$STATE_FILE" ]; then
   done < "$STATE_FILE"
 fi
 
-# 认证信息：优先 state.env，其次 /root/sub-auth.txt
 if [ -z "${R_SUBSCRIPTION:-}" ] && [ -f /root/sub-auth.txt ]; then
-  R_SUBSCRIPTION=$(cat /root/sub-auth.txt 2>/dev/null | tr -d '\r\n')
+  R_SUBSCRIPTION=$(tr -d '\r\n' < /root/sub-auth.txt 2>/dev/null)
 fi
 SUB_USER="${R_SUBSCRIPTION%%:*}"
 SUB_PASS="${R_SUBSCRIPTION#*:}"
 
-# UUID：state.env → websbox 目录名 → subtoken.log → nginx root
 UUID="${R_SUB_UUID:-}"
 if [ -z "$UUID" ] && [ -d "$WEBBOX_DIR" ]; then
   UUID=$(find "$WEBBOX_DIR" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null \
@@ -70,13 +82,10 @@ fi
 if [ -z "$UUID" ] && [ -f "$SUB_TOKEN_LOG" ]; then
   UUID=$(grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$SUB_TOKEN_LOG" 2>/dev/null | head -1)
 fi
-
-# 顺手回填缺失的 UUID（下次就不必再找）
-if [ -n "$UUID" ] && [ -z "${R_SUB_UUID:-}" ] && [ -w "$STATE_FILE" -o -w "$(dirname "$STATE_FILE")" ]; then
+if [ -n "$UUID" ] && [ -z "${R_SUB_UUID:-}" ] && [ -w "$(dirname "$STATE_FILE")" ]; then
   printf 'R_SUB_UUID=%s\n' "$UUID" >> "$STATE_FILE" 2>/dev/null || true
 fi
 
-# ── 缺少关键信息时给出明确指引，而不是输出半截链接 ───────────────────────
 missing=()
 if [ -z "$SUB_USER" ] || [ -z "$SUB_PASS" ] || [ "$SUB_USER" = "$SUB_PASS" ]; then
   missing+=("订阅账号密码（R_SUBSCRIPTION 或 /root/sub-auth.txt）")
@@ -84,20 +93,18 @@ fi
 [ -z "$UUID" ] && missing+=("订阅 UUID（R_SUB_UUID 或 $SUB_TOKEN_LOG）")
 [ -z "${R_CERT:-}${R_TAILSCALE:-}" ] && missing+=("至少一个入口地址（R_CERT 域名 或 R_TAILSCALE IP）")
 if [ ${#missing[@]} -gt 0 ]; then
-  printf '✗ 信息不全，无法拼出链接：\n' >&2
-  for m in "${missing[@]}"; do printf '  · %s\n' "$m" >&2; done
-  printf '\n先跑一次 `bash vps-bootstrap.sh subscription` 或手工补齐 %s\n' "$STATE_FILE" >&2
+  printf '错误：信息不全，无法拼出链接\n' >&2
+  for m in "${missing[@]}"; do printf '  - %s\n' "$m" >&2; done
+  printf '\n先跑一次 bash vps-bootstrap.sh subscription，或手工补齐 %s\n' "$STATE_FILE" >&2
   exit 1
 fi
 
-# ── 探测某个 URL 是否 200 ────────────────────────────────────────────────
+# ── 探测入口是否 200 ─────────────────────────────────────────────────────
 probe_code() {
-  local url=$1 host=$2 port=$3
+  local url=$1 host=$2 port=$3 code
   if [ "$CHECK" = 0 ]; then printf 'skip'; return; fi
-  local code
   code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time "$CURL_MAX" \
             --resolve "${host}:${port}:127.0.0.1" -u "${SUB_USER}:${SUB_PASS}" "$url" 2>/dev/null)
-  # Tailscale 监听不能靠 --resolve 回环命中，直接打内网 IP
   if [ -z "$code" ] || [ "$code" = "000" ]; then
     code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time "$CURL_MAX" \
               -u "${SUB_USER}:${SUB_PASS}" "$url" 2>/dev/null)
@@ -105,28 +112,15 @@ probe_code() {
   printf '%s' "${code:-000}"
 }
 
-# ── 收集条目 ─────────────────────────────────────────────────────────────
-# 每个文件给出人话说明，客户端认哪种格式一眼可见
-file_label() {
-  case "$1" in
-    clmi.yaml|*.yaml|*.yml) printf 'Clash / mihomo / Clash Verge / FlClash' ;;
-    jhsub.txt)              printf 'v2rayN / Karing / Shadowrocket / NekoBox' ;;
-    jhsub-lite.txt)         printf '同上，去 port-hopping 的兼容版（老客户端用）' ;;
-    sbox.json|*.json)       printf 'sing-box 原生（SFA / SFI / Karing 内核）' ;;
-    *.txt)                  printf '通用 TXT 订阅' ;;
-    *)                      printf '%s' "$(printf '%s' "$1" | sed 's/.*\.//')" ;;
-  esac
-}
-
+# ── 文件清单（按「新手先粘哪个」排序） ──────────────────────────────────
 FILES=()
 if [ -n "${UUID:-}" ] && [ -d "$WEBBOX_DIR/$UUID" ]; then
   while IFS= read -r f; do
-    [ -e "$f" ] || continue            # 断链跳过
+    [ -e "$f" ] || continue
     FILES+=("$(basename "$f")")
-  done < <(find "$WEBBOX_DIR/$UUID" -maxdepth 1 -mindepth 1 \( -name '*.yaml' -o -name '*.yml' -o -name '*.txt' -o -name '*.json' \) | sort)
+  done < <(find "$WEBBOX_DIR/$UUID" -maxdepth 1 -mindepth 1 \
+             \( -name '*.yaml' -o -name '*.yml' -o -name '*.txt' -o -name '*.json' \) | sort)
 fi
-
-# 按「新手最该先粘哪个」排序：Clash 系 → TXT → 兼容 TXT → sing-box JSON
 if [ ${#FILES[@]} -gt 1 ]; then
   __ordered=()
   for __want in clmi.yaml jhsub.txt jhsub-lite.txt sbox.json; do
@@ -137,35 +131,60 @@ if [ ${#FILES[@]} -gt 1 ]; then
   for __f in "${FILES[@]}"; do
     __hit=0
     if [ ${#__ordered[@]} -gt 0 ]; then
-      for __o in "${__ordered[@]}"; do
-        [ "$__f" = "$__o" ] && { __hit=1; break; }
-      done
+      for __o in "${__ordered[@]}"; do [ "$__f" = "$__o" ] && { __hit=1; break; }; done
     fi
     [ "$__hit" = 0 ] && __ordered+=("$__f")
   done
   FILES=("${__ordered[@]}")
 fi
 
-# 入口表：label|base_url|host|port
-ENTRIES=()
-[ -n "${R_CERT:-}" ] && ENTRIES+=("公网 443（走 TCP，运营商可能封 IP）|https://${R_CERT}|${R_CERT}|443")
-[ -n "${R_TAILSCALE:-}" ] && ENTRIES+=("Tailscale 8080（内网，需本机装 Tailscale 并登录）|http://${R_TAILSCALE}:8080|${R_TAILSCALE}|8080")
+file_desc() {
+  # 窄终端用短标签，避免说明文字自己折行
+  if [ "$W" -lt 62 ]; then
+    case "$1" in
+      clmi.yaml|*.yaml|*.yml) printf 'Clash 系' ;;
+      jhsub.txt)              printf 'v2rayN 等' ;;
+      jhsub-lite.txt)         printf '老客户端' ;;
+      sbox.json|*.json)       printf 'sing-box' ;;
+      *.txt)                  printf 'TXT' ;;
+      *)                      printf '其它' ;;
+    esac
+    return
+  fi
+  case "$1" in
+    clmi.yaml|*.yaml|*.yml) printf 'Clash Verge / ClashX / FlClash / mihomo' ;;
+    jhsub.txt)              printf 'v2rayN / Karing / Shadowrocket / NekoBox' ;;
+    jhsub-lite.txt)         printf '同上，但去掉了端口跳跃（老版本客户端）' ;;
+    sbox.json|*.json)       printf 'sing-box 原生（SFA / SFI / Karing 内核）' ;;
+    *.txt)                  printf '通用 TXT 订阅' ;;
+    *)                      printf '其它格式' ;;
+  esac
+}
 
-# ── JSON 模式 ────────────────────────────────────────────────────────────
+# ── 入口表 ───────────────────────────────────────────────────────────────
+ENTRIES=()
+[ -n "${R_CERT:-}" ]      && ENTRIES+=("A|公网 443|https://${R_CERT}|${R_CERT}|443")
+[ -n "${R_TAILSCALE:-}" ] && ENTRIES+=("B|Tailscale 8080|http://${R_TAILSCALE}:8080|${R_TAILSCALE}|8080")
+
+url_of() {   # url_of <base> <file>
+  printf '%s://%s:%s@%s/%s/%s' "${1%%://*}" "$SUB_USER" "$SUB_PASS" "${1#*://}" "$UUID" "$2"
+}
+
+# ── JSON ─────────────────────────────────────────────────────────────────
 if [ "$MODE" = json ]; then
   printf '{\n  "generated": "%s",\n  "uuid": "%s",\n  "auth_user": "%s",\n  "entries": [\n' \
          "$(date -Iseconds)" "$UUID" "$SUB_USER"
   first=1
   for e in "${ENTRIES[@]}"; do
-    IFS='|' read -r lbl base host port <<< "$e"
+    IFS='|' read -r key lbl base host port <<< "$e"
     [ $first -eq 0 ] && printf ',\n'; first=0
-    code=$(probe_code "${base}/${UUID}/clmi.yaml" "$host" "$port")
-    printf '    {"label": "%s", "base": "%s", "ok": %s, "links": [' "$lbl" "$base" \
-           "$([ "$code" = 200 ] && printf true || printf false)"
+    code=$(probe_code "$base/$UUID/clmi.yaml" "$host" "$port")
+    [ "$code" = 200 ] && okv=true || okv=false
+    printf '    {"key": "%s", "label": "%s", "base": "%s", "ok": %s, "links": [' "$key" "$lbl" "$base" "$okv"
     f1=1
     for f in "${FILES[@]}"; do
       [ $f1 -eq 0 ] && printf ', '; f1=0
-      printf '{"file": "%s", "url": "%s/%s/%s"}' "$f" "${base%%://*}://${SUB_USER}:${SUB_PASS}@${base#*://}" "$UUID" "$f"
+      printf '{"file": "%s", "url": "%s"}' "$f" "$(url_of "$base" "$f")"
     done
     printf ']}'
   done
@@ -173,59 +192,83 @@ if [ "$MODE" = json ]; then
   exit 0
 fi
 
-# ── --bare 模式 ──────────────────────────────────────────────────────────
-if [ "$MODE" = bare ]; then
+# ── --bare / --save：只有 URL ────────────────────────────────────────────
+collect_urls() {
+  local e base
   for e in "${ENTRIES[@]}"; do
-    IFS='|' read -r lbl base host port <<< "$e"
-    for f in "${FILES[@]}"; do
-      printf '%s/%s/%s\n' "${base%%://*}://${SUB_USER}:${SUB_PASS}@${base#*://}" "$UUID" "$f"
-    done
+    IFS='|' read -r _ _ base _ _ <<< "$e"
+    for f in "${FILES[@]}"; do url_of "$base" "$f"; printf '\n'; done
   done
+}
+
+if [ "$MODE" = bare ]; then collect_urls; exit 0; fi
+
+if [ "$MODE" = save ]; then
+  collect_urls > "$SAVE_PATH" || { printf '写入失败：%s\n' "$SAVE_PATH" >&2; exit 1; }
+  chmod 600 "$SAVE_PATH"
+  n=$(wc -l < "$SAVE_PATH")
+  printf '已写入 %s（%s 条链接，权限 600）\n\n' "$SAVE_PATH" "$n"
+  printf '查看：  cat %s\n' "$SAVE_PATH"
+  printf '下载：  Tabby / MobaXterm 的 SFTP 面板，路径填 %s\n' "$SAVE_PATH"
   exit 0
 fi
 
-# ── 人读模式 ─────────────────────────────────────────────────────────────
-line() { printf '%s\n' "────────────────────────────────────────────────────────────────────────"; }
-big()  { printf '%s\n' "════════════════════════════════════════════════════════════════════════"; }
+# ── 人读格式 ─────────────────────────────────────────────────────────────
+badge() {
+  case "$1" in
+    200)     printf '%s[OK]%s' "$G" "$N" ;;
+    skip)    printf '%s[SKIP]%s' "$D" "$N" ;;
+    000|"")  printf '%s[FAIL]%s' "$R" "$N" ;;
+    401)     printf '%s[401]%s' "$Y" "$N" ;;
+    *)       printf '%s[%s]%s' "$Y" "$1" "$N" ;;
+  esac
+}
 
-big
-printf '  %s订阅链接一览%s    %s\n' "$B" "$N" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
-big
-printf '  UUID: %s\n' "$UUID"
-printf '  账号: %s    密码: %s   %s（链接里已内嵌，复制即可用）%s\n' "$SUB_USER" "$SUB_PASS" "$D" "$N"
-line
+idx=0
+eq
+printf ' CloudCone VPS  订阅链接一览\n'
+printf ' %s   UUID %s\n' "$(date '+%Y-%m-%d %H:%M')" "$UUID"
+eq
+printf '\n'
 
 for e in "${ENTRIES[@]}"; do
-  IFS='|' read -r lbl base host port <<< "$e"
-  code=$(probe_code "${base}/${UUID}/clmi.yaml" "$host" "$port")
-  case "$code" in
-    200)      badge="${G}● 本机可用${N}" ;;
-    skip)     badge="${D}● 未检测${N}" ;;
-    000|"")   badge="${R}● 连不上${N}" ;;
-    401)      badge="${Y}● 401 账号密码不对${N}" ;;
-    *)        badge="${Y}● HTTP $code${N}" ;;
-  esac
-  printf '  %s%s%s  %s\n' "$B" "$lbl" "$N" "$badge"
-  authbase="${base%%://*}://${SUB_USER}:${SUB_PASS}@${base#*://}"
+  IFS='|' read -r key lbl base host port <<< "$e"
+  code=$(probe_code "$base/$UUID/clmi.yaml" "$host" "$port")
+  printf ' %s 入口 %s · %s\n' "$(badge "$code")" "$key" "$lbl"
+  hr
   for f in "${FILES[@]}"; do
-    printf '    %-16s %s\n' "$f" "$(file_label "$f")"
-    printf '    %s%s/%s/%s%s\n' "$C" "$authbase" "$UUID" "$f" "$N"
+    idx=$((idx+1))
+    printf '  [%d] %-16s %s\n' "$idx" "$f" "$(file_desc "$f")"
+    printf '  %s\n' "$(url_of "$base" "$f")"
+    printf '\n'
   done
-  printf '\n'
 done
 
-line
-printf '  %sSSH 管理入口%s\n' "$B" "$N"
-[ -n "${R_TAILSCALE:-}" ] && printf '    ssh root@%s    %s（Tailscale，需本机在线，最稳）%s\n' "$R_TAILSCALE" "$D" "$N"
-[ -n "${R_NETWORK:-}" ]   && printf '    ssh root@%s      %s（公网直连，国内多数情况会被丢包）%s\n' "$R_NETWORK" "$D" "$N"
-printf '    别名：ssh server1 / ssh s1\n\n'
-
-line
-printf '  %s怎么选%s\n' "$B" "$N"
-printf '    · 两个入口内容完全一样，任选其一即可，不必都填\n'
-printf '    · 拉不到 / 很慢时，换另一个入口试试（这是保留两个的唯一理由）\n'
-printf '    · Tailscale 入口要求本机装了 Tailscale 且已登录；卸载/退出后该链接失效\n'
-printf '    · 公网入口要求运营商没封这个 IP 的 TCP 443（2026-11-20 曾被整 IP 丢弃过）\n'
-printf '    · Clash 系客户端粘 clmi.yaml；v2rayN / Karing 粘 jhsub.txt；老客户端用 jhsub-lite.txt\n'
-big
-[ "$CHECK" = 1 ] && printf '  检测为服务器本机自测（127.0.0.1），只证明 nginx 与证书正常；\n  客户端能否拉到还取决于你所在网络的封锁情况。\n'
+hr
+printf ' 怎么用\n'
+hr
+printf '  1. 一次只填 1 条。同一入口的 4 个文件内容相同，只是格式不同。\n'
+printf '  2. 链接已含账号密码，直接粘进客户端，不用另填。\n'
+printf '  3. 拉不动就换另一个入口的同类文件（入口 A 挂了换 B，反之亦然）。\n'
+if [ "$W" -lt 62 ]; then
+  printf '  4. URL 折行只是显示，文件里只有一行，三击那一行即可整条选中。\n'
+else
+  printf '  4. URL 超过窗口宽度会折成两行，这是正常的 —— 它在文件里只有一行，\n'
+  printf '     鼠标三击那一行即可整条选中（第二行只是显示折行，不是换行）。\n'
+fi
+printf '\n'
+printf ' 想一次性拿到干净列表（推荐，不用手选）\n'
+hr
+if [ "$W" -lt 62 ]; then
+  printf '  在命令后面加参数：\n'
+  printf '    --bare   只吐 URL，一行一条\n'
+  printf '    --save   写到 %s\n' "$SAVE_PATH"
+else
+  printf '  bash %s --bare    只吐 URL，一行一条\n' "$0"
+  printf '  bash %s --save    写到 %s\n' "$0" "$SAVE_PATH"
+fi
+eq
+if [ "$CHECK" = 1 ]; then
+  printf ' %s注：检测是服务器本机自测（127.0.0.1），只证明 nginx 与证书正常；%s\n' "$D" "$N"
+  printf ' %s    你那边能不能拉到，还取决于当地运营商的封锁。%s\n' "$D" "$N"
+fi

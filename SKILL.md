@@ -238,12 +238,16 @@ bash vps-bootstrap.sh subscription user=sub pass=<可选>
 
 ### 步骤 7.5 · links（把链接交到用户手上）
 ```bash
-bash /root/show-links.sh              # 人读：分组 + 可用性徽标 + 怎么选
-bash /root/show-links.sh --bare       # 只吐 URL，便于复制
+bash /root/show-links.sh              # 人读：分组 + 徽标 + 怎么选（宽度自适应 46–78 列）
+bash /root/show-links.sh --bare       # 只吐 URL，一行一条
+bash /root/show-links.sh --save       # 写成 /root/subscription-links.txt（600），SFTP 下载
+bash /root/show-links.sh --json       # 机器可读
+bash /root/show-links.sh --no-check   # 跳过自测，快 1–2 秒
 ```
 - **脚本做**：从 `state.env` 拼出公网 443 + Tailscale 8080 两组链接（认证内嵌）→ 扫 `websbox/<UUID>/` 只列真实存在的文件 → 本机 curl 自测每入口是否 200 → 缺失 `R_SUB_UUID` 时自动回填
 - **交付话术**：把两组链接**都贴给用户**，并说明「任选一条；拉不动就换另一条」。只说一条，等于把「另一个入口能救命」的事实藏起来
 - ⚠️ 脚本自测只证明 nginx + 证书正常，**不证明用户那边能拉到**（还受运营商封锁影响）。不要把「本机可用」说成「你能用」
+- ⚠️ **改输出排版时守住三条**（用户已投诉过一次「看不清」）：① 徽标放**行首**（`[OK] 入口 A · 公网 443`），放行尾会随中文标题长度漂移；② `printf %-Ns` **只用于英文表头/文件名**，中文宽度算不准必然错位，中文只放行尾说明位；③ 宽度 `tput cols` 夹 46–78 并**为窄窗口准备短标签**（`Clash 系` / `老客户端`），别写死 84 列
 - 详见 PLAYBOOK 第 9 节
 
 ### 步骤 8 · harden（加固）
@@ -345,6 +349,7 @@ bash vps-bootstrap.sh reset cert       # 重置某步以便重跑
 
 ```bash
 bash /root/show-links.sh        # 两组入口 + 可用性徽标 + 该粘哪个文件
+bash /root/show-links.sh --save # 同一内容写成纯 URL 清单，给用户 SFTP 下载
 ```
 
 两条入口**都要给用户**，别只给一条：

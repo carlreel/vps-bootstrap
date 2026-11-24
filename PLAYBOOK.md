@@ -449,20 +449,49 @@ bash /root/show-links.sh --no-check # 跳过探测，快 1~2 秒
 bash /root/vps-bootstrap.sh links [--bare|--json|--no-check]
 ```
 
-输出长这样（真实回显，已脱敏的只有你自己的机器会看到真值）：
+输出长这样（真实回显，只把密码和 UUID 打了星；你自己跑会看到真值）：
 
 ```
-  公网 443（走 TCP，运营商可能封 IP）  ● 本机可用
-    clmi.yaml        Clash / mihomo / Clash Verge / FlClash
-    https://sub:****@cloudcone.interlinked.dpdns.org/<UUID>/clmi.yaml
-    jhsub.txt        v2rayN / Karing / Shadowrocket / NekoBox
-    https://sub:****@cloudcone.interlinked.dpdns.org/<UUID>/jhsub.txt
-    jhsub-lite.txt   同上，去 port-hopping 的兼容版（老客户端用）
-    sbox.json        sing-box 原生（SFA / SFI / Karing 内核）
+==============================================================================
+ CloudCone VPS  订阅链接一览
+ 2026-11-24 11:45   UUID a65b73c0-****-****-****-************
+==============================================================================
 
-  Tailscale 8080（内网，需本机装 Tailscale 并登录）  ● 本机可用
-    http://sub:****@100.x.x.x:8080/<UUID>/clmi.yaml
+ [OK] 入口 A · 公网 443
+------------------------------------------------------------------------------
+  [1] clmi.yaml        Clash Verge / ClashX / FlClash / mihomo
+  https://sub:****@cloudcone.interlinked.dpdns.org/<UUID>/clmi.yaml
+
+  [2] jhsub.txt        v2rayN / Karing / Shadowrocket / NekoBox
+  https://sub:****@cloudcone.interlinked.dpdns.org/<UUID>/jhsub.txt
+
+  [3] jhsub-lite.txt   同上，但去掉了端口跳跃（老版本客户端）
+  https://sub:****@cloudcone.interlinked.dpdns.org/<UUID>/jhsub-lite.txt
+
+  [4] sbox.json        sing-box 原生（SFA / SFI / Karing 内核）
+  https://sub:****@cloudcone.interlinked.dpdns.org/<UUID>/sbox.json
+
+ [OK] 入口 B · Tailscale 内网 8080
+------------------------------------------------------------------------------
+  （同样 4 条，域名段换成 http://sub:****@100.67.142.126:8080/<UUID>/...）
 ```
+
+排版上有三条硬规矩，改脚本时别破坏：
+
+| 规矩 | 为什么 |
+|---|---|
+| **徽标放行首**（`[OK] 入口 A · 公网 443`） | 放行尾时，中文标题一长，状态就往右飘，多行参差不齐 |
+| **表头用英文/文件名，不用中文字段名** | 中文占 2 列宽，`printf %-16s` 按字节补齐必然错位；只让中文出现在**行尾说明**位置 |
+| **宽度跟随窗口**（`tput cols`，夹在 46–78） | 固定 84 列在 MobaXterm 默认窗口会折行；窄窗口自动换短标签（`Clash 系` / `老客户端`） |
+
+`--save` 会写一份纯 URL 清单，方便整份拖选或 SFTP 下载：
+
+```bash
+bash /root/show-links.sh --save
+# → /root/subscription-links.txt（权限 600，8 条，一行一条，无任何装饰字符）
+```
+
+从服务器拿回本机：Tabby / MobaXterm 的 SFTP 面板，路径填 `/root/subscription-links.txt` 直接下载。
 
 脚本干的事，全部从 `state.env` 取，**零硬编码**：
 

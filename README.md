@@ -1,4 +1,4 @@
-# vps-bootstrap
+﻿# vps-bootstrap
 
 VPS 自建代理的**编排器 + AI 操作手册**。目标：替代 / 超越 `sing-box-yg (sb)` 脚本，覆盖「从一台空服务器到订阅可用」的全流程，并规避 9 个已知的坑。
 
@@ -34,6 +34,7 @@ bash /root/vps-bootstrap.sh probe          # 人读
 bash /root/vps-bootstrap.sh probe --json   # 贴给 AI
 bash /root/vps-bootstrap.sh status         # 做到第几步
 bash /root/show-links.sh                   # 全部订阅链接（公网 + Tailscale）
+bash /root/show-links.sh --save            # 同上，另存一份纯 URL 清单便于下载
 
 # 3. 逐步执行（每步可单独跑、可重跑）
 bash /root/vps-bootstrap.sh network
