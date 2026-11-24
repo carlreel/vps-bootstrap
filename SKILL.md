@@ -396,15 +396,84 @@ Measure-Command { Resolve-DnsName www.baidu.com -Server 223.5.5.5 }
 Measure-Command { Resolve-DnsName www.baidu.com -Server 1.1.1.1 }   # 若用 DoH 则测 https://1.1.1.1/dns-query
 ```
 
-### 节点可用性速查（路线② / IP 级 TCP 封锁）
+### 节点可用性速查（**带条件，会随出口 IP 变**）
 
-| 协议 | 传输层 | 能否用 | 备注 |
+⚠️ 下表是 **2026-11-20，出口 IP `54.46.106.13`（移动 CGNAT）** 的结论。2026-11-24 出口换成 `111.58.230.68` 后整套反转：TCP 全通、UDP 被限、只有 Argo 域名被封。**用之前先测当前出口 IP，别照抄。**
+
+| 协议 | 传输层 | 11-20 那天 | 备注 |
 |---|---|---|---|
 | hysteria2 | UDP/QUIC | ✅ | 配合端口跳跃 |
 | TUIC v5 | UDP/QUIC | ✅ | |
-| vmess-ws + CDN | TCP 443 → CF | ✅ | 需 ingress 配对 |
-| vless-reality | TCP | ❌ | 不能套 CDN |
-| vmess-ws 直连 | TCP | ❌ | |
+| vmess-ws + CDN | TCP 443 → CF | ✅ | 需 ingress 配对 + 域名没被封 |
+| vless-reality | TCP | ❌ | 不能套 CDN；11-24 已恢复 |
+| vmess-ws 直连 | TCP | ❌ | 11-24 已恢复 |
 | anytls | TCP | ❌ | 无 UDP 变体 |
 
-**给用户的建议**：订阅里只保留前 3 类，避免「一选就死」。
+**给用户的建议**：订阅里同时保留 UDP 系（hy2/tuic）、CDN 系（argo）和直连系各一个，**环境一变总有一个活着**；不要只留一类。
+
+---
+
+## 10. 复诊 / 接手已在运行的部署（用户报错时第一件事）
+
+**先跑这三条，再谈别的**（细节见 PLAYBOOK 第 8 节）：
+
+```powershell
+(Invoke-RestMethod 'https://api.ipify.org?format=json').ip          # 1. 当前出口 IP（不走代理）
+Test-NetConnection <VPS_IP> -Port 22                                 # 2. 直连是否恢复
+& 'C:\Program Files\Tailscale\tailscale.exe' status                  # 3. 保命通道
+```
+
+判定：
+
+- 出口 IP 与上次记录**不同** → 封锁结论全部作废，重新分类
+- TCP 22 **OPEN** → 用 `ssh root@<IP>` 直连，别绕 Tailscale
+- TCP 22 **TIMEOUT** → 回到路线②，走 Tailscale / CDN
+
+### 10.1 用内核实测，别信客户端 UI
+
+```powershell
+# 起独立 mihomo 实例，不动用户正在用的那个
+& 'C:\Program Files\Clash Verge\verge-mihomo.exe' -d <dir> -f <cfg>
+# 先校验配置
+& 'C:\Program Files\Clash Verge\verge-mihomo.exe' -d <dir> -f <cfg> -t
+# 逐节点测（url 必须用国内可达的 204）
+Invoke-RestMethod "http://127.0.0.1:<ctrl>/proxies/<name>/delay?url=http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=8000" -Headers @{Authorization='Bearer <secret>'}
+```
+
+最小配置骨架（复制即用，只换 proxies）：
+
+```yaml
+mixed-port: 17897
+mode: rule
+log-level: warning
+external-controller: 127.0.0.1:19097
+secret: probe
+dns:
+  enable: true
+  default-nameserver: ["223.5.5.5"]
+  nameserver: ["223.5.5.5", "119.29.29.29"]
+proxies: []
+rules:
+  - MATCH,DIRECT
+```
+
+> 用 `verge-mihomo.exe` 而不是用户自己的配置目录，避免覆盖他正在用的 Clash 配置。测完 `Stop-Process`。
+
+### 10.2 四个高频复诊结论
+
+| 现象 | 根因 | 动作 |
+|---|---|---|
+| TCP 全 TIMEOUT | 当前出口对该 IP 丢包 | 走 CDN / Tailscale / UDP |
+| TCP 通，但所有节点 >1.5s | 出口 QoS 限速 | 端口跳跃；换协议；换 CDN |
+| **单节点 ERR，TCP 通，同 IP 换 SNI 正常** | **域名被 SNI 封锁** | 换 hostname（PLAYBOOK 8.3） |
+| Tailscale `NoState` / Relay 不同城 | 客户端没起 / 打洞失败 | 重启客户端；只当管理通道 |
+
+### 10.3 修完必须回写状态
+
+```bash
+# 服务器：让下一个接手的 AI 看到正确域名
+cd /root/.vps-bootstrap && sed -i 's/^R_ARGO_DOMAIN=.*/R_ARGO_DOMAIN=<新域名>/' state.env
+# 本地仓库：更新 PLAYBOOK 第 8.6 节的复盘表（日期 + 出口 IP + 结论）
+```
+
+**否则下一个 AI 会按旧域名、旧封锁结论排查，浪费一整轮。**

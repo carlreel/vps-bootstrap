@@ -284,3 +284,122 @@ IPv6          : <公网 IPv6>          ← 可选，有则优先用于 SSR / 直
 - [ ] `sshd -T | grep passwordauthentication` 为 `no`
 - [ ] 证书 `openssl x509 -enddate` 剩余 > 30 天，且续期 cron 存在
 - [ ] 订阅三种格式都能返回 200
+
+---
+
+## 8. 环境漂移：网络条件会变，上次的结论不能沿用
+
+**最容易犯的错**：把上一次会话的封锁结论当事实。运营商换一个 CGNAT 出口，整套策略就反转。
+
+### 8.1 每次复诊的第一条命令：确认「现在的」出口 IP
+
+```powershell
+# 必须不走代理，否则查到的是代理 IP，会误判
+(Invoke-RestMethod 'https://api.ipify.org?format=json').ip
+```
+
+记进环境清单。**IP 段变了 → 上一轮所有「什么被封 / 什么能通」的结论全部作废，重测。**
+
+### 8.2 三段探测：分清「IP 被封 / 端口被封 / 域名被封」
+
+| 层 | 命令 | 判读 |
+|---|---|---|
+| L3 ICMP | `ping -n 4 <IP>` | 通 ≠ 业务通，只说明路由可达 |
+| L4 TCP | `Test-NetConnection <IP> -Port 443` | OPEN = 没被丢；TIMEOUT = 端口级或整 IP 丢弃 |
+| L7 TLS | `curl -sv https://<域名>/` | **TCP 通但 `Recv failure: Connection was reset` = SNI 域名词黑名单** |
+
+**SNI 对照法**（定位「域名被墙」唯一可靠的办法）：同一个 CF IP，只换 SNI 看 TLS 是否成功。
+
+```powershell
+foreach ($sni in 'cloudflare-ech.com','www.baidu.com','<你的argo域名>') {
+  & curl.exe -s -o NUL -w "code=%{http_code} tls=%{time_appconnect}s" --max-time 10 --http1.1 `
+    --resolve "$sni:443:104.18.10.118" "https://$sni/"
+}
+```
+
+| 结果组合 | 结论 |
+|---|---|
+| 正常域名成功、你的域名 RST | **域名进了 SNI 黑名单** → 换域名，不是换 IP |
+| 所有 SNI 都 RST | IP 被干扰 → 换 IP / 换 CDN 出口 |
+| 所有 SNI 都超时 | TCP 被封 → 走 CDN 或 UDP |
+
+### 8.3 Argo 域名被 SNI 阻断的完整修复（实测约 12 分钟）
+
+1. Cloudflare 后台 → **Zero Trust → Networks → Tunnels** → 该隧道 → **Public Hostname** → Add a public hostname
+2. 新子域填 `www.<你的域>`（或任意没用过的名字），Service 保持 `HTTP` → `localhost:2082`
+3. 旧 hostname 留着无害，但订阅**必须全部改指向新域名**
+4. 服务器上替换（**四处都要改，漏一个就是半失效**）：
+
+```bash
+cd /etc/s-box && TS=$(date +%Y%m%d-%H%M%S)
+for f in sbox.json clmi.yaml sbargoym.log; do
+  cp "$f" "$f.bak-$TS"
+  python3 - "$f" '<旧域名>' '<新域名>' <<'PY'
+import sys
+p, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(p, encoding='utf-8', errors='surrogateescape').read()
+print(f"  {p}: {s.count(old)} 处")
+open(p, 'w', encoding='utf-8', errors='surrogateescape').write(s.replace(old, new))
+PY
+done
+grep -c '<旧域名>' sbox.json clmi.yaml    # 应为 0
+```
+
+5. 验证（**必须是 101，不是 200**）：
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" --http1.1 \
+  -H "Host: <新域名>" -H "Upgrade: websocket" -H "Connection: Upgrade" \
+  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  "https://<新域名>/<ws-path>"
+```
+
+6. 客户端拉一次订阅，用**内核实测**延迟，不要只看客户端 UI 的红绿
+
+**别试 domain fronting**：SNI 填 `cloudflare-ech.com` + `Host: <argo域名>` → Cloudflare 直接 **403**（实测），这条路在 CF 上封死。
+
+### 8.4 UDP 到底有没有到达服务器（tcpdump 判据）
+
+```bash
+# 服务器端先起，窗口 10 秒
+timeout 10 tcpdump -i eth0 -n "udp and (port 22047 or port 27567 or port 41641)" | head -40
+```
+
+```powershell
+# 本机另开窗口同时发包
+$u = New-Object System.Net.Sockets.UdpClient
+$ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Parse('<IP>'), 22047)
+$b = [Text.Encoding]::ASCII.GetBytes('probe-' + ('x' * 40)); $u.Send($b, $b.Length, $ep)
+```
+
+判读要点：
+
+- **tcpdump 在 AF_PACKET 层，早于 iptables**：看到入站包 = 网络真的送到了；看不到 = 中间被丢
+- QUIC 服务端对乱码包**不一定回包**（hy2 不回、tuic 会回 Version Negotiation）→ 别用「没回包」判定不通
+- 实测同一出口可以一个端口通、一个端口丢（27567 通，22047 与 41641 丢）→ UDP 策略按端口/五元组做，不是全封
+
+### 8.5 Tailscale 的坏状态
+
+| 症状 | 原因 | 处理 |
+|---|---|---|
+| `unexpected state: NoState` / "Tailscale is starting" | 客户端状态机没起来（服务在跑但没登录态） | 重启客户端 GUI / 服务；仍不行 `tailscale up --accept-dns=false` 重走一次 |
+| `Relay=hkg` ↔ `Relay=lax`，`CurAddr` 空 | **打洞失败，走 DERP 中继** | UDP 41641 被丢必然如此；能连但慢，只当管理通道 |
+| 完全连不上 | 出口 UDP 全封 | 放弃 Tailscale，用公网 SSH（22 若通） |
+
+### 8.6 2026-11-24 复盘：封锁整体反转
+
+| 项 | 11-20 | 11-24 |
+|---|---|---|
+| 本机出口 IP | `54.46.106.13` | `111.58.230.68`（移动重新分配 CGNAT） |
+| VPS TCP 22/443/2082/30424/51548 | 全部 TIMEOUT | **全部 OPEN** |
+| UDP 22047 / 41641 | 通 | 丢包（探测包 0 到达） |
+| UDP 27567 | 通 | 仍通 |
+| 实测延迟 | hy2/tuic 快 | hy2 2.1s / tuic 1.3s / vless 1.8s（都在 1–3 秒） |
+| 唯一坏的 | — | **Argo 域名 `aaa.aptic.cc.cd` 被 SNI 阻断** |
+
+教训：
+
+1. **「封 TCP」和「封 UDP」都可能，取决于当前出口 IP**，不是 VPS 的属性
+2. 上次标「❌ 不可用」的协议，下次可能全绿；反之亦然。**协议可用性表必须带日期 + 出口 IP**
+3. 用户说「某些节点报错」时，先用**内核实测**（Clash API `/proxies/<name>/delay`）复现，别凭客户端 UI 的红字下结论
+4. 修完把新域名写回 `/root/.vps-bootstrap/state.env` 的 `R_ARGO_DOMAIN`，否则下一个接手的 AI 会按旧域名排查
