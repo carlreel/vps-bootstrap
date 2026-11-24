@@ -403,3 +403,112 @@ $b = [Text.Encoding]::ASCII.GetBytes('probe-' + ('x' * 40)); $u.Send($b, $b.Leng
 2. 上次标「❌ 不可用」的协议，下次可能全绿；反之亦然。**协议可用性表必须带日期 + 出口 IP**
 3. 用户说「某些节点报错」时，先用**内核实测**（Clash API `/proxies/<name>/delay`）复现，别凭客户端 UI 的红字下结论
 4. 修完把新域名写回 `/root/.vps-bootstrap/state.env` 的 `R_ARGO_DOMAIN`，否则下一个接手的 AI 会按旧域名排查
+
+---
+
+## 9. 订阅入口：为什么留两条、怎么查、怎么用
+
+这是整套部署**最后交付给用户的那个东西**。前面所有工作做对了，如果这里给错了链接，用户看到的仍然是「用不了」。
+
+### 9.1 两条入口，互补，不是冗余
+
+同一份订阅内容，挂两个 listener：
+
+| 入口 | 监听 | 走什么 | 什么时候能用 |
+|---|---|---|---|
+| **公网 443** | nginx `0.0.0.0:443`，LE 证书 | 公网 TCP + TLS | 运营商没封这个 IP 的 443 |
+| **Tailscale 8080** | nginx `100.x.x.x:8080` | Tailscale 中继（DERP） | 本机装了 Tailscale 且在线 |
+
+**为什么两个都要留**：
+
+- 2026-11-20 那次，中国移动对该 IP 做了**整 IP 的 TCP 丢弃**（22/80/443 全超时），但 Tailscale 走 UDP 打洞/中继，照样能拉订阅 → 8080 是那条命
+- 反过来 2026-11-24 那次，UDP 按端口被丢（22047/41641 探测包一个都没到），Tailscale 掉到 DERP 中继（能用但慢），而公网 443 完全通畅 → 443 是那条命
+- **两者依赖不同的网络层，一起被封的概率远低于单独一个**
+
+实测（2026-11-24，同一台机器、同一份 clmi.yaml）：
+
+| 入口 | 3 次平均 | 说明 |
+|---|---|---|
+| `http://100.67.142.126:8080` | **0.84s** | 省掉 TLS 握手，反而更快 |
+| `https://cloudcone.interlinked.dpdns.org` | 1.30s | 慢的 0.46s 全在 TLS |
+
+结论：**「公网一定更快」是错的**。别为了速度去做偏好设置，两个都留着、谁通谁的用。
+
+### 9.2 一条命令交出全部链接
+
+```bash
+bash /root/show-links.sh            # 人读：分组 + 可用性徽标 + 怎么选
+bash /root/show-links.sh --bare     # 只吐 URL，一行一条，方便复制
+bash /root/show-links.sh --json     # 机器可读
+bash /root/show-links.sh --no-check # 跳过探测，快 1~2 秒
+```
+
+也可以走编排器转发（效果相同）：
+
+```bash
+bash /root/vps-bootstrap.sh links [--bare|--json|--no-check]
+```
+
+输出长这样（真实回显，已脱敏的只有你自己的机器会看到真值）：
+
+```
+  公网 443（走 TCP，运营商可能封 IP）  ● 本机可用
+    clmi.yaml        Clash / mihomo / Clash Verge / FlClash
+    https://sub:****@cloudcone.interlinked.dpdns.org/<UUID>/clmi.yaml
+    jhsub.txt        v2rayN / Karing / Shadowrocket / NekoBox
+    https://sub:****@cloudcone.interlinked.dpdns.org/<UUID>/jhsub.txt
+    jhsub-lite.txt   同上，去 port-hopping 的兼容版（老客户端用）
+    sbox.json        sing-box 原生（SFA / SFI / Karing 内核）
+
+  Tailscale 8080（内网，需本机装 Tailscale 并登录）  ● 本机可用
+    http://sub:****@100.x.x.x:8080/<UUID>/clmi.yaml
+```
+
+脚本干的事，全部从 `state.env` 取，**零硬编码**：
+
+1. 读 `R_CERT` / `R_TAILSCALE` / `R_SUB_UUID` / `R_SUBSCRIPTION`（缺失时回落到 `/root/sub-auth.txt`、`/etc/s-box/subtoken.log`、`websbox/*/` 目录名）
+2. 找到 UUID 后**自动回填** `R_SUB_UUID` 到 `state.env`（下次不必再猜）
+3. 扫 `websbox/<UUID>/` 下**实际存在且未断链**的文件，只列真的能拉的那些
+4. 本机自测每个入口的 `clmi.yaml` 是否 200（`curl --resolve ... 127.0.0.1`），给 `● 本机可用 / ● 连不上 / ● 401 账号密码不对`
+5. 认证已**内嵌进 URL**（`sub:密码@域名`），复制粘贴即用，不用另填账号
+
+### 9.3 客户端该粘哪一条
+
+| 客户端 | 粘这个文件 |
+|---|---|
+| Clash Verge / ClashX / FlClash / mihomo 系 | `clmi.yaml` |
+| v2rayN / Karing / Shadowrocket / NekoBox | `jhsub.txt` |
+| 上面但**不支持 port-hopping 语法**（老版本） | `jhsub-lite.txt`（已去掉 `mport`） |
+| sing-box 原生（SFA / SFI） | `sbox.json` |
+
+规则：**同一时间只填一条入口**。拉不动时换另一条，不要指望客户端自动切换（见 9.4）。
+
+### 9.4 为什么不做「自动择优」
+
+用户会问「能不能两个都填、自动挑快的」。做不到，且不该做：
+
+- **协议层不支持**：Clash / mihomo / Verge 的订阅 URL 是单一字段，没有多 URL 竞速。Cloudflare Worker 之类的中转也救不了——它访问不到 `100.x` 的 Tailscale 网段
+- **代价与收益不成比例**：能硬做的只有双 `proxy-providers`（两个 URL 各拉一份），代价是节点重复、要加前缀区分、Verge 每次更新订阅会覆盖（得养 `Merge.yaml`），换来的是「省一次手点重试」
+- **真正该自动的层已经自动了**：节点选择（订阅里的 `♻️ 自动选择` = url-test，每 5 分钟测延迟选最快）。**订阅拉取一天几次，节点选择每分钟都在生效**
+
+所以正确做法就是：两个入口都留着，用户手动选，文档写清「哪条挂了换哪条」。
+
+### 9.5 重新搭建时怎么保证这一步不丢
+
+`show-links.sh` 是**独立自包含脚本**，不在 `vps-bootstrap.sh` 里内联——因为它要在「订阅已经配好、但编排器可能没装」的情况下也能用。
+
+部署时要放到**两个**位置（`vps-bootstrap.sh links` 会按顺序找）：
+
+```bash
+/root/show-links.sh                 # 主位置，用户直接跑这个
+/root/.vps-bootstrap/show-links.sh  # 备份位置，跟着状态目录走
+```
+
+`state.env` 里为此需要的字段（`subscription` 步骤会自动写入，手工搭建时别忘）：
+
+```bash
+R_CERT=cloudcone.example.com        # 公网入口域名
+R_TAILSCALE=100.x.x.x               # Tailscale 入口 IP
+R_SUB_UUID=<uuid>                   # 订阅路径里的 UUID（缺了脚本会自己找并回填）
+R_SUBSCRIPTION="user:pass"          # Basic Auth
+```

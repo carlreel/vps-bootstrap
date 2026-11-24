@@ -234,7 +234,17 @@ bash vps-bootstrap.sh subscription user=sub pass=<可选>
 - **脚本做**：装 nginx + htpasswd → 443 SSL + Basic Auth → **额外开一个只绑 Tailscale IP 的 8080** → 杀 busybox httpd → 清 crontab
 - **为什么要有 8080**：路线②下公网 443 从国内也拉不到，Tailscale 入口是唯一能"未连代理时拉订阅"的通道
 - **验证**：无密码 401 / 带密码 200
-- **交付给用户**：三种订阅链接（YAML / TXT / JSON），带内嵌账号密码
+- **交付给用户**：**两条入口 × 三种格式**，别只给一条（见步骤 7.5）
+
+### 步骤 7.5 · links（把链接交到用户手上）
+```bash
+bash /root/show-links.sh              # 人读：分组 + 可用性徽标 + 怎么选
+bash /root/show-links.sh --bare       # 只吐 URL，便于复制
+```
+- **脚本做**：从 `state.env` 拼出公网 443 + Tailscale 8080 两组链接（认证内嵌）→ 扫 `websbox/<UUID>/` 只列真实存在的文件 → 本机 curl 自测每入口是否 200 → 缺失 `R_SUB_UUID` 时自动回填
+- **交付话术**：把两组链接**都贴给用户**，并说明「任选一条；拉不动就换另一条」。只说一条，等于把「另一个入口能救命」的事实藏起来
+- ⚠️ 脚本自测只证明 nginx + 证书正常，**不证明用户那边能拉到**（还受运营商封锁影响）。不要把「本机可用」说成「你能用」
+- 详见 PLAYBOOK 第 9 节
 
 ### 步骤 8 · harden（加固）
 ```bash
@@ -301,6 +311,7 @@ bash vps-bootstrap.sh harden
 bash vps-bootstrap.sh probe            # 快速看现状（人读）
 bash vps-bootstrap.sh probe --json     # 贴给 AI
 bash vps-bootstrap.sh status           # 看做到第几步
+bash vps-bootstrap.sh links            # 列出全部订阅链接（公网 + Tailscale）
 bash vps-bootstrap.sh all              # 按序跑完剩余步骤
 bash vps-bootstrap.sh reset cert       # 重置某步以便重跑
 ```
@@ -310,6 +321,7 @@ bash vps-bootstrap.sh reset cert       # 重置某步以便重跑
 /root/.vps-bootstrap/state.env      # 进度
 /root/.vps-bootstrap/logs/          # 各步日志
 /root/.vps-bootstrap/backups/       # 改动前备份（按 时间戳 命名）
+/root/show-links.sh                 # 订阅链接速查（独立脚本，用户随时可跑）
 ```
 
 ---
@@ -328,6 +340,31 @@ bash vps-bootstrap.sh reset cert       # 重置某步以便重跑
 ## 9. 客户端接入（服务器全绿之后的最后一公里）
 
 **这一步最容易白忙**：服务器侧全部正常、节点 ping 通，但客户端上不了网。
+
+### 9.0 先解决「链接从哪来」
+
+```bash
+bash /root/show-links.sh        # 两组入口 + 可用性徽标 + 该粘哪个文件
+```
+
+两条入口**都要给用户**，别只给一条：
+
+| 入口 | 什么时候是唯一出路 |
+|---|---|
+| 公网 `https://<域名>/<UUID>/` | 本机 Tailscale 掉了 / 没登录 / UDP 被限到走不动 |
+| Tailscale `http://100.x.x.x:8080/<UUID>/` | 运营商对该 IP 整段丢 TCP（2026-11-20 真实发生） |
+
+两者依赖不同网络层，**互补**。实测 Tailscale 那条反而更快（0.84s vs 1.30s，省 TLS），所以不要按「公网更快」去做取舍。
+客户端**不支持**多 URL 自动择优，别答应这种需求（理由见 PLAYBOOK 9.4）。
+
+**粘哪个文件**：
+
+| 客户端 | 文件 |
+|---|---|
+| Clash Verge / ClashX / FlClash / mihomo | `clmi.yaml` |
+| v2rayN / Karing / Shadowrocket / NekoBox | `jhsub.txt` |
+| 老版本不支持 port-hopping | `jhsub-lite.txt`（已去 `mport`） |
+| sing-box 原生（SFA / SFI） | `sbox.json` |
 
 ### 核心判据
 

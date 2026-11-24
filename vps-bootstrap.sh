@@ -23,6 +23,7 @@
 #   argo token=eyJh...              安装 Cloudflare Tunnel 并校验
 #   subscription [user=sub] [pass=x] 部署 nginx 安全订阅
 #   harden                          防火墙 + SSH 加固
+#   links [--bare|--json]           列出全部订阅链接（公网 443 + Tailscale 8080）
 #   all                             按序执行所有未完成步骤
 #   reset [step]                    清除某步状态以便重跑
 # ============================================================================
@@ -752,10 +753,27 @@ cmd_reset() {
 }
 
 # ══════════════════════════════════════════════════════════════════════
+# links —— 打印全部订阅链接（公网 + Tailscale），方便复制粘贴
+#   实现在 show-links.sh，这里只负责找它并转发参数
+# ══════════════════════════════════════════════════════════════════════
+cmd_links() {
+  local s here
+  here=$(cd "$(dirname "$0")" && pwd)
+  for s in "$ROOT/show-links.sh" "/root/show-links.sh" "$here/show-links.sh"; do
+    if [ -f "$s" ]; then
+      STATE_FILE="$STATE" bash "$s" "$@"
+      return $?
+    fi
+  done
+  die "找不到 show-links.sh，请把它放到 /root/show-links.sh（或与本脚本同目录）"
+}
+
+# ══════════════════════════════════════════════════════════════════════
 CMD="${1:-help}"; shift 2>/dev/null || true
 case "$CMD" in
   probe)        cmd_probe "${1:-}" ;;
   status)       cmd_status ;;
+  links)        cmd_links "$@" ;;
   network)      cmd_network ;;
   tailscale)    CMD=tailscale cmd_tailscale ;;
   singbox)      CMD=singbox cmd_singbox ;;

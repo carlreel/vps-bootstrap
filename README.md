@@ -26,12 +26,14 @@ sb 脚本能一键装起 sing-box，但它在这些地方会坑人：
 ```bash
 # 1. 送进服务器（仓库为 public，直接拉）
 curl -fsSL https://raw.githubusercontent.com/carlreel/vps-bootstrap/main/vps-bootstrap.sh -o /root/vps-bootstrap.sh
-chmod +x /root/vps-bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/carlreel/vps-bootstrap/main/show-links.sh     -o /root/show-links.sh
+chmod +x /root/vps-bootstrap.sh /root/show-links.sh
 
-# 2. 看现状 / 看进度
+# 2. 看现状 / 看进度 / 看链接
 bash /root/vps-bootstrap.sh probe          # 人读
 bash /root/vps-bootstrap.sh probe --json   # 贴给 AI
 bash /root/vps-bootstrap.sh status         # 做到第几步
+bash /root/show-links.sh                   # 全部订阅链接（公网 + Tailscale）
 
 # 3. 逐步执行（每步可单独跑、可重跑）
 bash /root/vps-bootstrap.sh network
@@ -47,13 +49,16 @@ bash /root/vps-bootstrap.sh harden
 bash /root/vps-bootstrap.sh all
 ```
 
+装完最后一件事：`bash /root/show-links.sh`，把打出来的两组链接复制到客户端。
+
 ## 文件说明
 
 | 文件 | 给谁 | 说明 |
 |---|---|---|
 | **`SKILL.md`** | **只给 AI 读** | 阶段零诊断、决策树、8 步流程、9 条禁止事项、失败排查表 |
-| `PLAYBOOK.md` | 人 + AI | 三条路线、8 个真实踩坑、协议可用性速查、环境清单模板 |
-| `vps-bootstrap.sh` | 执行 | 编排器：8 步子命令 + 状态机 + 端口冲突预检 |
+| `PLAYBOOK.md` | 人 + AI | 三条路线、8 个真实踩坑、协议可用性速查、订阅入口取舍、环境清单模板 |
+| `vps-bootstrap.sh` | 执行 | 编排器：9 个子命令 + 状态机 + 端口冲突预检 |
+| `show-links.sh` | 用户 | 一条命令列出全部订阅链接（公网 443 + Tailscale 8080），认证内嵌、带可用性检测 |
 | `vps-probe.sh` | 双方 | 独立只读探针（更详细），`--json` 可贴给 AI |
 
 ## 相对 sb 的改进
